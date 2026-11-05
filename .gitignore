@@ -45,7 +45,7 @@ config/tmp*
 *.pyw
 dev_tools/debug_tools
 /campaign/test/
-/toolkit
+# /toolkit —— 本 fork 的本地扩展目录，需要纳入版本管理，不再忽略
 PaddleOCR
 
 # Tests

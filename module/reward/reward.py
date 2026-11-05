@@ -324,4 +324,10 @@ class Reward(UI):
         self.ui_goto(page_main)
         self.reward_mission(daily=self.config.Reward_CollectMission,
                             weekly=self.config.Reward_CollectWeeklyMission)
+        # 本地扩展：收完菜后按需刷新 Dashboard 资源（实现在 toolkit/，带节流）。
+        try:
+            from toolkit.dashboard_refresh import maybe_refresh
+            maybe_refresh(self)
+        except Exception:
+            pass
         self.config.task_delay(server_update=True)
