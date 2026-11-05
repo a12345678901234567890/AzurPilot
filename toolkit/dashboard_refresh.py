@@ -221,12 +221,21 @@ def _read_campaign(ui):
 def _read_pt(ui):
     """在活动页读取 PT。
 
-    没有活动（战役页看不到活动入口按钮）时写入 0——此时 Panel 上显示 "-"
-    没有意义，写 0 更直观。注意只在**明确确认**活动入口不存在时才写 0，
-    读取过程出错（页面异常、OCR 失败等）则跳过，避免把真实 PT 误写成 0。
+    **必须确认真的进入了活动页才 OCR**。踩过的坑：``appear_then_click``
+    点完活动入口后只截一次图就读，此时多半还在主界面/战役页的过渡画面上，
+    ``OCR_EVENT_PT`` 区域覆盖的是人物立绘，会误识别出 "2" 之类的垃圾数字
+    （实测日志：``[OCR_EVENT_PT] 2`` 而当前根本没有活动）。
+
+    因此：没进入活动页 → 写 0（当前无活动）；进入了才读真实数值。
+
+    Args:
+        ui: 具备 config/device 的模块对象。
+
+    Returns:
+        dict: ``{'Pt': int}`` 或 ``{}``（读取失败，保留原值）。
     """
     from module.campaign.campaign_status import CampaignStatus
-    from module.ui.page import page_campaign
+    from module.ui.page import page_campaign, page_event, page_sp
     from module.ui.assets import CAMPAIGN_GOTO_EVENT
 
     status = CampaignStatus(ui.config, ui.device)
@@ -236,30 +245,61 @@ def _read_pt(ui):
         logger.info(f'[资源刷新] 无法进入战役页，跳过 PT: {type(error).__name__}')
         return {}
 
-    # 先确认活动入口在不在：不在就是当前没有活动，写 0。
-    # 注意：CAMPAIGN_GOTO_EVENT 是战役菜单里常驻的入口按钮，即使当前没有
-    # 活动也会显示（点了进不去），所以这里只把它当作“可能存在活动”的信号，
-    # 真正的判定交给下面 OCR 是否成功。
-    has_event = bool(ui.appear(CAMPAIGN_GOTO_EVENT, offset=(20, 20)))
-    if not has_event:
+    # 1. 确认活动入口在不在
+    if not ui.appear(CAMPAIGN_GOTO_EVENT, offset=(20, 20)):
         logger.info('[资源刷新] 战役页无活动入口，PT 记为 0')
         return {'Pt': 0}
 
+    # 2. 点击进入，并**等到真的出现在活动页**
     try:
-        if ui.appear_then_click(CAMPAIGN_GOTO_EVENT, offset=(20, 20), interval=2):
-            ui.device.screenshot()
-        # 直接读 PT，不用 get_event_pt(update=True)：那个方法在 OCR 失败时
+        ui.appear_then_click(CAMPAIGN_GOTO_EVENT, offset=(20, 20), interval=2)
+    except Exception as error:
+        logger.info(f'[资源刷新] 点击活动入口失败: {type(error).__name__}')
+        return {}
+
+    if not _wait_page(ui, (page_event, page_sp), timeout=6.0):
+        logger.info('[资源刷新] 未进入活动页（当前无活动），PT 记为 0')
+        return {'Pt': 0}
+
+    # 3. 页面已确认，此时 OCR 区域才是真正的 PT 数字
+    try:
+        # 直接读，不用 get_event_pt(update=True)：那个方法在 OCR 失败时
         # 会把 Pt 写成 0，等我们拿到返回值时已经污染了配置。
         pt = status.get_event_pt(update=False)
     except Exception as error:
         logger.warning(f'[资源刷新] 活动 PT 读取异常，保留原值: {type(error).__name__}')
         return {}
 
-    # get_event_pt 在解析失败时返回 0 或空串，这里据此判定“当前无活动”
-    if pt is None or pt == '' or (isinstance(pt, int) and pt == 0):
-        logger.info('[资源刷新] 活动页无 PT 数值（当前无活动），PT 记为 0')
-        return {'Pt': 0}
+    if not isinstance(pt, int) or pt < 0:
+        logger.warning(f'[资源刷新] 活动 PT 识别结果无效({pt!r})，保留原值')
+        return {}
     return {'Pt': int(pt)}
+
+
+def _wait_page(ui, pages, timeout=6.0):
+    """等待当前页面成为 pages 中的任意一个。
+
+    Args:
+        ui: 具备 device 与 ui_page_appear 的模块对象。
+        pages (tuple): 目标 Page 列表。
+        timeout (float): 最多等待秒数。
+
+    Returns:
+        bool: 是否到达目标页面之一。
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            ui.device.screenshot()
+            if any(ui.ui_page_appear(page) for page in pages):
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.3)
 
 
 def _read_os(ui):
@@ -349,7 +389,17 @@ def _read_purple_coins(ui):
     siren = ui
     entered_port = entered_shop = False
     try:
-        # 0. 确保停在一个能买东西的碧蓝港口
+        # 0. 确保 zone 已初始化。
+        #    globe_goto() 第一行就访问 self.zone，而 zone 只在 zone_init()
+        #    之后才存在——直接 new 一个 OperationSiren 时没有这个属性，
+        #    会抛 AttributeError: 'OperationSiren' object has no attribute 'zone'。
+        #    上游所有任务都是先 zone_init() 再操作，这里照做。
+        try:
+            siren.zone_init()
+        except Exception as error:
+            logger.warning(f'[资源刷新] 海域初始化失败，跳过紫币: {type(error).__name__}')
+            return None
+
         try:
             zone = siren.zone
             is_azur = bool(getattr(zone, 'is_azur_port', False))
