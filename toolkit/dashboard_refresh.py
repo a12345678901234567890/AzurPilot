@@ -256,23 +256,29 @@ def _read_pt(ui):
     if pt is None or pt == '' or (isinstance(pt, int) and pt == 0):
         logger.info('[资源刷新] 活动页无 PT 数值（当前无活动），PT 记为 0')
         return {'Pt': 0}
-        return {}
     return {'Pt': int(pt)}
 
 
 def _read_os(ui):
-    """大世界页读取 ActionPoint / YellowCoin / PurpleCoin，并顺带记录海里数。
+    """大世界：读 ActionPoint / YellowCoin（地图页）、PurpleCoin（港口商店），
+    并顺带记录海里数。
 
-    复用调度器已有实现，保证与任务内读数口径完全一致。
-    海里数不属于 Dashboard 的 12 项：它来自 cl1 数据库的 distance 序列，
-    由 ``module.api.runtime_service.monthly_statistics_resources`` 渲染到
-    主页 Dashboard。只要在这里写进 cl1，就比原来只在侵蚀1练级时更新要准确
-    得多——任何开新图（月度开荒、隐秘海域等）都会让海里数增长。
+    三个值的读取位置**不一样**，这是关键：
+
+    - ``ActionPoint`` 与 ``YellowCoin``：大世界**总览地图页**顶栏常显，
+      用 ``scheduler.resources.refresh_resources`` 直接读。
+    - ``PurpleCoin``：地图页**根本不显示**。上游的
+      ``SHOP_PURPLE_COINS (325,110)`` 是港口补给商店里的坐标，在地图页
+      读到的是地图背景，偶尔会 OCR 出垃圾数字（实测曾误记成 1802，
+      而真实值 1650）。因此必须进港口商店再读。
+
+    ``refresh_resources`` 会把紫币一起塞进它的地图页流程，所以这里只让它
+    读 ActionPoint / YellowCoin，紫币走 :func:`_read_purple_coins`。
     """
     from module.scheduler.resources import refresh_resources
     from module.config.deep import deep_get
 
-    wanted = ['ActionPoint', 'YellowCoin', 'PurpleCoin']
+    wanted = ['ActionPoint', 'YellowCoin']
     refresh_resources(ui.config, ui.device, wanted)
 
     # 此刻已在大世界页，顺手读海里数
@@ -287,6 +293,75 @@ def _read_os(ui):
         if isinstance(value, int) and value >= 0:
             result[name] = value
     return result
+
+
+def _read_purple_coins(ui):
+    """进入大世界港口商店读取紫币（特别兑换凭证）。
+
+    紫币在大世界总览地图页**不显示**，必须进港口 → 补给商店才能读到。
+    上游 ``SHOP_PURPLE_COINS`` 的坐标是商店内的位置，在地图页会读到
+    地图背景并可能吐出错值。
+
+    流程（全部复用上游导航，不新增 OCR 模板）::
+
+        地图页 --PORT_ENTER--> 港口 --PORT_GOTO_SUPPLY--> 商店
+              <--BACK_ARROW--     <--BACK_ARROW--
+
+    Args:
+        ui: OperationSiren 实例（当前在地图/大世界页）。
+
+    Returns:
+        int | None: 紫币数量，失败返回 None。
+    """
+    from module.os_handler.assets import PORT_ENTER, PORT_GOTO_SUPPLY
+    from module.os_handler.port import PORT_CHECK
+    from module.os_shop.assets import PORT_SUPPLY_CHECK
+    from module.os_handler.os_status import OCR_OS_SHOP_PURPLE_COINS
+
+    siren = ui
+    entered_port = entered_shop = False
+    try:
+        # 1. 进港口：PORT_ENTER 只在地图页停泊时出现
+        if not siren.appear(PORT_ENTER, offset=(20, 20)):
+            logger.info('[资源刷新] 当前不在可停泊的港口，跳过紫币')
+            return None
+        siren.ui_click(PORT_ENTER, check_button=PORT_CHECK,
+                       appear_button=PORT_ENTER, offset=(20, 20),
+                       skip_first_screenshot=True)
+        entered_port = True
+
+        # 2. 进补给商店
+        siren.ui_click(PORT_GOTO_SUPPLY, appear_button=PORT_CHECK,
+                       check_button=PORT_SUPPLY_CHECK, skip_first_screenshot=True)
+        entered_shop = True
+        siren.device.sleep(0.5)
+        siren.device.screenshot()
+
+        # 3. 商店页读紫币（此时坐标才对应紫币余额）
+        ocr = OCR_OS_SHOP_PURPLE_COINS
+        value = ocr.ocr(siren.device.image)
+        if not isinstance(value, int) or value < 0 or not getattr(ocr, 'last_valid', False):
+            logger.warning(f'[资源刷新] 商店内紫币识别无效({value!r})，保留原值')
+            return None
+
+        from module.log_res import LogRes
+        LogRes(ui.config).record('PurpleCoin', value, source='dashboard_refresh')
+        logger.info(f'[资源刷新] 紫币已记录：{value}')
+        return value
+    except Exception as error:
+        logger.warning(f'[资源刷新] 读取紫币失败: {type(error).__name__}: {error}')
+        return None
+    finally:
+        # 无论成败都退回地图页，避免把后续阶段留在港口里
+        try:
+            if entered_shop:
+                siren.ui_back(appear_button=PORT_SUPPLY_CHECK, check_button=PORT_CHECK,
+                              skip_first_screenshot=True)
+            if entered_port:
+                siren.ui_back(appear_button=PORT_CHECK, check_button=siren.is_in_map,
+                              skip_first_screenshot=True)
+        except Exception as error:
+            logger.warning(f'[资源刷新] 退出港口失败: {type(error).__name__}')
 
 
 def _record_sea_miles(ui):
@@ -459,6 +534,11 @@ def refresh(script, resources: Iterable[str]):
             elif stage == 'os':
                 if active:
                     collected.update(_read_os(script))
+                    # 紫币在商店里，需要额外进一次港口
+                    if 'PurpleCoin' in active:
+                        purple = _read_purple_coins(script)
+                        if purple is not None:
+                            collected['PurpleCoin'] = purple
                 elif sea_miles:
                     # 只记海里数：仍需进大世界页，复用现成导航
                     _enter_os_and_record_sea_miles(script)
