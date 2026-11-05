@@ -198,7 +198,12 @@ def _read_campaign(ui):
 
 
 def _read_pt(ui):
-    """在活动页读取 PT；没有活动时安静跳过。"""
+    """在活动页读取 PT。
+
+    没有活动（战役页看不到活动入口按钮）时写入 0——此时 Panel 上显示 "-"
+    没有意义，写 0 更直观。注意只在**明确确认**活动入口不存在时才写 0，
+    读取过程出错（页面异常、OCR 失败等）则跳过，避免把真实 PT 误写成 0。
+    """
     from module.campaign.campaign_status import CampaignStatus
     from module.ui.page import page_campaign
     from module.ui.assets import CAMPAIGN_GOTO_EVENT
@@ -206,13 +211,28 @@ def _read_pt(ui):
     status = CampaignStatus(ui.config, ui.device)
     try:
         status.ui_ensure(page_campaign)
+    except Exception as error:
+        logger.info(f'[资源刷新] 无法进入战役页，跳过 PT: {type(error).__name__}')
+        return {}
+
+    # 先确认活动入口在不在：不在就是当前没有活动，写 0
+    has_event = bool(ui.appear(CAMPAIGN_GOTO_EVENT, offset=(20, 20)))
+    if not has_event:
+        logger.info('[资源刷新] 战役页无活动入口，PT 记为 0')
+        return {'Pt': 0}
+
+    try:
         if ui.appear_then_click(CAMPAIGN_GOTO_EVENT, offset=(20, 20), interval=2):
             ui.device.screenshot()
         pt = status.get_event_pt(update=True)
-        return {'Pt': int(pt)} if isinstance(pt, int) and pt > 0 else {}
     except Exception as error:
-        logger.info(f'[资源刷新] 活动 PT 不可读，跳过: {type(error).__name__}')
+        logger.warning(f'[资源刷新] 活动 PT 读取异常，保留原值: {type(error).__name__}')
         return {}
+
+    if not isinstance(pt, int) or pt < 0:
+        logger.warning(f'[资源刷新] 活动 PT 识别结果无效({pt!r})，保留原值')
+        return {}
+    return {'Pt': int(pt)}
 
 
 def _read_os(ui):
