@@ -67,9 +67,16 @@ _STAGES = (
 
 #: 海里数：不属于 Dashboard 的 12 项，走 cl1 数据库的 distance 序列，
 #: 由 runtime_service.monthly_statistics_resources 渲染到主页 Dashboard。
-#: 它在大世界页右栏常显，读取成本极低，因此不受 Resources 限制，
+#: 它在大世界总览页右栏常显，读取成本极低，因此不受 Resources 限制，
 #: 只要进了大世界页就顺手记录（可用 RecordSeaMiles 单独关闭）。
 SEA_MILES_DEFAULT = True
+
+#: 「出海里程」数值区域（1280×720 坐标），按 2560×1440 实机截图标定。
+#: 注意不是上游 MARITIME_SCHEDULE(162,505)——那个在左侧，是侵蚀1情报子页
+#: 的旧位置，在大世界总览页会一直读到 0。
+SEA_MILES_AREA = (1040, 414, 1096, 433)
+SEA_MILES_COLOR = (242, 212, 56)
+SEA_MILES_LETTER = (255, 207, 66)
 
 
 # ==================== 配置读取 ====================
@@ -226,7 +233,10 @@ def _read_pt(ui):
         logger.info(f'[资源刷新] 无法进入战役页，跳过 PT: {type(error).__name__}')
         return {}
 
-    # 先确认活动入口在不在：不在就是当前没有活动，写 0
+    # 先确认活动入口在不在：不在就是当前没有活动，写 0。
+    # 注意：CAMPAIGN_GOTO_EVENT 是战役菜单里常驻的入口按钮，即使当前没有
+    # 活动也会显示（点了进不去），所以这里只把它当作“可能存在活动”的信号，
+    # 真正的判定交给下面 OCR 是否成功。
     has_event = bool(ui.appear(CAMPAIGN_GOTO_EVENT, offset=(20, 20)))
     if not has_event:
         logger.info('[资源刷新] 战役页无活动入口，PT 记为 0')
@@ -235,13 +245,17 @@ def _read_pt(ui):
     try:
         if ui.appear_then_click(CAMPAIGN_GOTO_EVENT, offset=(20, 20), interval=2):
             ui.device.screenshot()
-        pt = status.get_event_pt(update=True)
+        # 直接读 PT，不用 get_event_pt(update=True)：那个方法在 OCR 失败时
+        # 会把 Pt 写成 0，等我们拿到返回值时已经污染了配置。
+        pt = status.get_event_pt(update=False)
     except Exception as error:
         logger.warning(f'[资源刷新] 活动 PT 读取异常，保留原值: {type(error).__name__}')
         return {}
 
-    if not isinstance(pt, int) or pt < 0:
-        logger.warning(f'[资源刷新] 活动 PT 识别结果无效({pt!r})，保留原值')
+    # get_event_pt 在解析失败时返回 0 或空串，这里据此判定“当前无活动”
+    if pt is None or pt == '' or (isinstance(pt, int) and pt == 0):
+        logger.info('[资源刷新] 活动页无 PT 数值（当前无活动），PT 记为 0')
+        return {'Pt': 0}
         return {}
     return {'Pt': int(pt)}
 
@@ -276,26 +290,36 @@ def _read_os(ui):
 
 
 def _record_sea_miles(ui):
-    """在当前画面读取海里数并写入 cl1 数据库。
+    """在当前画面读取「出海里程」并写入 cl1 数据库。
 
-    海里数显示在大世界页右栏（情报/MISSION 子页默认展开），OCR 区域是
-    ``MARITIME_SCHEDULE``。这里只读当前截图，不导航、不点击，失败就跳过。
+    **不要用** 上游的 ``OCR_SEA_MILES_DIGIT``：它的区域 ``MARITIME_SCHEDULE``
+    是 ``(162, 505)``，位于屏幕**左侧**，那是侵蚀1情报子页里的旧位置，
+    在大世界总览页读到的一直是 0。
+
+    这里按 2560×1440 实机截图标定的位置读取：
+    「出海里程」数值在大世界**大地图总览页右侧面板**，
+    1280×720 下为 ``(1040, 414, 1096, 433)``，文字为亮黄色 RGB(242, 212, 56)。
+    实测 OCR 结果为 12685，与画面一致。
 
     Args:
-        ui: 具备 config/device 的模块对象（大世界页已就绪）。
+        ui: 具备 config/device 的模块对象（大世界总览页已就绪）。
 
     Returns:
         int | None: 读到的海里数，失败返回 None。
     """
     try:
-        from module.os.sea_miles_ocr import OCR_SEA_MILES_DIGIT
+        from module.base.button import Button
+        from module.ocr.ocr import Digit
 
-        value = OCR_SEA_MILES_DIGIT.ocr(ui.device.image)
+        button = Button(area=SEA_MILES_AREA, color=SEA_MILES_COLOR,
+                        button=SEA_MILES_AREA, name='SEA_MILES_OVERVIEW')
+        ocr = Digit(button, lang='azur_lane', letter=SEA_MILES_LETTER,
+                    threshold=128, alphabet='0123456789',
+                    name='SEA_MILES_OVERVIEW')
+
+        value = ocr.ocr(ui.device.image)
         if not isinstance(value, int) or value <= 0:
             logger.info(f'[资源刷新] 海里数识别无效({value!r})，跳过')
-            return None
-        if not getattr(OCR_SEA_MILES_DIGIT, 'last_valid', True):
-            logger.info('[资源刷新] 海里数 OCR 未通过校验，跳过')
             return None
 
         from module.statistics.opsi_runtime import record_ap_snapshot
