@@ -34,11 +34,25 @@ Reward.run()
 | 资源 | 读取位置 | 依赖的现成实现 |
 | --- | --- | --- |
 | `Oil`、`Coin` | 战役页 | `CampaignStatus.get_oil()` / `get_coin()` |
-| `Pt` | 活动页 | `CampaignStatus.get_event_pt()`（无活动时安静跳过） |
+| `Pt` | 活动页 | `CampaignStatus.get_event_pt()`（**无活动时写 0**） |
 | `ActionPoint`、`YellowCoin`、`PurpleCoin` | 大世界页 | `scheduler.resources.refresh_resources()` |
 | `Gem`、`Merit`、`GuildCoin` | 军需商店 · 通用标签 | `ShopStatus.status_get_*()` |
 | `Core`、`Medal` | 军需商店 · 月度标签 | `ShopStatus.status_get_*()` |
 | `Cube` | 建造页 | `OCR_BUILD_CUBE_COUNT` |
+
+### 额外：海里数
+
+海里数**不属于** Dashboard 的 12 项，它是 `cl1` 数据库里的 `distance` 序列，
+由 `module/api/runtime_service.py` 的 `monthly_statistics_resources()` 渲染到
+主页 Dashboard（这就是为什么 `dashboard.yaml` 里查不到它）。
+
+上游只在**侵蚀1练级**任务里更新它，但实际上只要在大世界开新图（月度开荒、
+隐秘海域、深渊、要塞……）海里数都会增长。本扩展在进入大世界页时顺带记录一次，
+不需要额外导航：
+
+- 读取位置：大世界页右栏 · 情报/MISSION 子页（默认展开），OCR 区域 `MARITIME_SCHEDULE`
+- 写入：`record_ap_snapshot(distance=...)` → `cl1` 数据库
+- 开关：`DashboardRefresh.RecordSeaMiles`，默认 `true`
 
 > 全部复用上游已有的读取函数，**不新增任何 OCR 模板**，
 > 因此与游戏内实际数值口径完全一致。
@@ -74,6 +88,7 @@ module/reward/reward.py         # 只在 run() 末尾追加 5 行挂载
 | `Enable` | `true` | 总开关 |
 | `Resources` | 全部 12 项 | 只刷哪些，如 `["Oil","Coin","Cube"]` |
 | `MinIntervalHours` | `4` | 节流小时数；`0` 表示每次都刷 |
+| `RecordSeaMiles` | `true` | 是否顺带记录海里数 |
 
 示例：
 
@@ -81,13 +96,16 @@ module/reward/reward.py         # 只在 run() 末尾追加 5 行挂载
 {
   "DashboardRefresh": {
     "Resources": ["Oil", "Coin", "Gem", "Cube"],
-    "MinIntervalHours": 6
+    "MinIntervalHours": 6,
+    "RecordSeaMiles": true
   }
 }
 ```
 
 - 未知资源名自动过滤
 - `MinIntervalHours` 非数字时回落到 4
+- 即使 `Resources` 里没有大世界三项，只要 `RecordSeaMiles` 为真，
+  仍会进一次大世界页记录海里数
 
 ## 7. 行为与风险
 

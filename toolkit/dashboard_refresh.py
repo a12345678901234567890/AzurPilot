@@ -65,6 +65,12 @@ _STAGES = (
     ('build', ('Cube',)),
 )
 
+#: 海里数：不属于 Dashboard 的 12 项，走 cl1 数据库的 distance 序列，
+#: 由 runtime_service.monthly_statistics_resources 渲染到主页 Dashboard。
+#: 它在大世界页右栏常显，读取成本极低，因此不受 Resources 限制，
+#: 只要进了大世界页就顺手记录（可用 RecordSeaMiles 单独关闭）。
+SEA_MILES_DEFAULT = True
+
 
 # ==================== 配置读取 ====================
 
@@ -110,6 +116,11 @@ def settings(config):
     if hours < 0:
         hours = 0.0
     return enabled, resources, hours
+
+
+def record_sea_miles_enabled(config):
+    """是否记录海里数（默认开启，可用 RecordSeaMiles 关闭）。"""
+    return bool(_read(config, 'RecordSeaMiles', SEA_MILES_DEFAULT))
 
 
 # ==================== 节流 ====================
@@ -236,15 +247,22 @@ def _read_pt(ui):
 
 
 def _read_os(ui):
-    """大世界页读取 ActionPoint / YellowCoin / PurpleCoin。
+    """大世界页读取 ActionPoint / YellowCoin / PurpleCoin，并顺带记录海里数。
 
     复用调度器已有实现，保证与任务内读数口径完全一致。
+    海里数不属于 Dashboard 的 12 项：它来自 cl1 数据库的 distance 序列，
+    由 ``module.api.runtime_service.monthly_statistics_resources`` 渲染到
+    主页 Dashboard。只要在这里写进 cl1，就比原来只在侵蚀1练级时更新要准确
+    得多——任何开新图（月度开荒、隐秘海域等）都会让海里数增长。
     """
     from module.scheduler.resources import refresh_resources
     from module.config.deep import deep_get
 
     wanted = ['ActionPoint', 'YellowCoin', 'PurpleCoin']
     refresh_resources(ui.config, ui.device, wanted)
+
+    # 此刻已在大世界页，顺手读海里数
+    _record_sea_miles(ui)
 
     result = {}
     for name in wanted:
@@ -255,6 +273,56 @@ def _read_os(ui):
         if isinstance(value, int) and value >= 0:
             result[name] = value
     return result
+
+
+def _record_sea_miles(ui):
+    """在当前画面读取海里数并写入 cl1 数据库。
+
+    海里数显示在大世界页右栏（情报/MISSION 子页默认展开），OCR 区域是
+    ``MARITIME_SCHEDULE``。这里只读当前截图，不导航、不点击，失败就跳过。
+
+    Args:
+        ui: 具备 config/device 的模块对象（大世界页已就绪）。
+
+    Returns:
+        int | None: 读到的海里数，失败返回 None。
+    """
+    try:
+        from module.os.sea_miles_ocr import OCR_SEA_MILES_DIGIT
+
+        value = OCR_SEA_MILES_DIGIT.ocr(ui.device.image)
+        if not isinstance(value, int) or value <= 0:
+            logger.info(f'[资源刷新] 海里数识别无效({value!r})，跳过')
+            return None
+        if not getattr(OCR_SEA_MILES_DIGIT, 'last_valid', True):
+            logger.info('[资源刷新] 海里数 OCR 未通过校验，跳过')
+            return None
+
+        from module.statistics.opsi_runtime import record_ap_snapshot
+        record_ap_snapshot(config=ui.config, ap_current=None,
+                           source='dashboard_refresh', distance=value)
+        logger.info(f'[资源刷新] 海里数已记录：{value}')
+        return value
+    except Exception as error:
+        logger.warning(f'[资源刷新] 读取海里数失败: {type(error).__name__}: {error}')
+        return None
+
+
+def _enter_os_and_record_sea_miles(ui):
+    """只为了记录海里数而进一次大世界页。
+
+    仅在用户把 ActionPoint/YellowCoin/PurpleCoin 都从 Resources 移除、
+    但仍保留 RecordSeaMiles 时走这条路径。
+
+    Returns:
+        int | None: 记录到的海里数。
+    """
+    from module.os.operation_siren import OperationSiren
+    from module.ui.page import page_os
+
+    os_ui = OperationSiren(ui.config, ui.device)
+    os_ui.ui_ensure(page_os)
+    return _record_sea_miles(os_ui)
 
 
 def _read_shop(ui, wanted):
@@ -353,9 +421,11 @@ def refresh(script, resources: Iterable[str]):
     logger.hr(f'Dashboard 资源刷新（{total} 项）', level=1)
 
     collected = {}
+    sea_miles = record_sea_miles_enabled(config)
     for stage, names in _STAGES:
         active = wanted & set(names)
-        if not active:
+        # 大世界阶段：即使没选 ActionPoint 等三项，只要要记海里数也要进一次
+        if not active and not (stage == 'os' and sea_miles):
             continue
         try:
             if stage == 'campaign':
@@ -363,7 +433,11 @@ def refresh(script, resources: Iterable[str]):
                 if 'Pt' in active:
                     collected.update(_read_pt(script))
             elif stage == 'os':
-                collected.update(_read_os(script))
+                if active:
+                    collected.update(_read_os(script))
+                elif sea_miles:
+                    # 只记海里数：仍需进大世界页，复用现成导航
+                    _enter_os_and_record_sea_miles(script)
             elif stage == 'shop':
                 collected.update(_read_shop(script, active))
             elif stage == 'build':
