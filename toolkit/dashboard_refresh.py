@@ -322,7 +322,10 @@ def _read_os(ui):
     wanted = ['ActionPoint', 'YellowCoin']
     refresh_resources(ui.config, ui.device, wanted)
 
-    # 此刻已在大世界页，顺手读海里数
+    # 此刻已在大世界页，顺手读海里数。
+    # ★ 注意：_record_sea_miles 需要底部「情报 DETAILS」按钮存在。
+    #   该按钮在**任意**大世界地图上都有（港口内、普通海域都有），
+    #   但前提是当前确实停在地图页而不是别处或被弹窗遮挡。
     _record_sea_miles(ui)
 
     result = {}
@@ -469,6 +472,44 @@ def _read_purple_coins(ui):
             logger.warning(f'[资源刷新] 退出港口失败: {type(error).__name__}')
 
 
+def _open_mission_popup(siren, timeout=8.0):
+    """循环点击「情报 DETAILS」，直到作战情报弹窗出现。
+
+    按钮会从右侧滑入，动画未结束时点击会落空，因此必须重试而不是只点一次。
+    这与上游 ``module/os_handler/mission.py`` 的 ``os_mission_enter`` 一致。
+
+    注意必须用 ``appear_then_click``（它会按匹配到的偏移点击），不要用
+    ``device.click(area 中心)``：``appear`` 用 ``offset=(200, 5)`` 做模板
+    匹配，实际命中位置和 ``area`` 中心可能差开，点中心会一直落空。
+
+    Args:
+        siren: OperationSiren 实例（应停在大世界地图页）。
+        timeout (float): 最多等待秒数。
+
+    Returns:
+        bool: 是否成功打开弹窗。
+    """
+    import time
+
+    from module.os_handler.assets import MISSION_ENTER, MISSION_CHECK
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            siren.device.screenshot()
+            if siren.appear(MISSION_CHECK, offset=(20, 20)):
+                logger.info('[资源刷新] 作战情报已打开')
+                return True
+            # appear_then_click 命中时会按实际位置点击
+            if siren.appear_then_click(MISSION_ENTER, offset=(200, 5), interval=1):
+                logger.info('[资源刷新] 点击情报按钮')
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.4)
+
+
 def _record_sea_miles(ui):
     """进入「作战情报」弹窗读取出海里程，写入 cl1 数据库。
 
@@ -495,15 +536,12 @@ def _record_sea_miles(ui):
     siren = ui
     entered = False
     try:
-        # 1. 进入作战情报弹窗，等到 MISSION_CHECK 出现再继续
-        if siren.appear_then_click(MISSION_ENTER, offset=(200, 5), interval=3):
-            logger.info('[资源刷新] 打开作战情报')
-        else:
-            # 按钮可能已在弹窗内或尚未渲染，直接点击一次按钮中心
-            area = MISSION_ENTER.area
-            siren.device.click(((area[0] + area[2]) // 2, (area[1] + area[3]) // 2))
-
-        if not _wait_page(ui, (MISSION_CHECK,), mode='appear', timeout=5.0):
+        # 1. 进入作战情报弹窗。
+        #    按钮「情报 DETAILS」在**任意**大世界地图上都有（港口内、普通海域
+        #    都有，实测 2026-11-05 在 NA Ocean SW Sector C 也正常显示），
+        #    但它会从右侧滑入，动画未结束时点击会落空。上游因此用循环重试
+        #    （module/os_handler/mission.py os_mission_enter），这里照做。
+        if not _open_mission_popup(siren):
             logger.warning('[资源刷新] 未能打开作战情报弹窗，跳过海里数')
             return None
         entered = True
