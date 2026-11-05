@@ -298,6 +298,24 @@ def _read_os(ui):
     return result
 
 
+def _operation_siren(script):
+    """根据 Reward 实例构造一个 OperationSiren。
+
+    ``refresh()`` 收到的是 ``Reward``（挂载点），但大世界导航、港口进出、
+    海域查询都在 ``OperationSiren`` 上。两者共享同一个 config/device，
+    因此直接复用即可。
+
+    Args:
+        script: 具备 config/device 的模块对象。
+
+    Returns:
+        OperationSiren: 大世界操作实例。
+    """
+    from module.os.operation_siren import OperationSiren
+
+    return OperationSiren(script.config, script.device)
+
+
 def _read_purple_coins(ui):
     """进入大世界港口商店读取紫币（特别兑换凭证）。
 
@@ -452,15 +470,16 @@ def _enter_os_and_record_sea_miles(ui):
     仅在用户把 ActionPoint/YellowCoin/PurpleCoin 都从 Resources 移除、
     但仍保留 RecordSeaMiles 时走这条路径。
 
+    Args:
+        ui: OperationSiren 实例。
+
     Returns:
         int | None: 记录到的海里数。
     """
-    from module.os.operation_siren import OperationSiren
     from module.ui.page import page_os
 
-    os_ui = OperationSiren(ui.config, ui.device)
-    os_ui.ui_ensure(page_os)
-    return _record_sea_miles(os_ui)
+    ui.ui_ensure(page_os)
+    return _record_sea_miles(ui)
 
 
 def _read_shop(ui, wanted):
@@ -571,16 +590,19 @@ def refresh(script, resources: Iterable[str]):
                 if 'Pt' in active:
                     collected.update(_read_pt(script))
             elif stage == 'os':
+                # 注意：script 是 Reward 实例，没有大世界导航方法。
+                # 海里数和紫币都需要 OperationSiren，这里显式构造一个。
+                siren = _operation_siren(script)
                 if active:
-                    collected.update(_read_os(script))
+                    collected.update(_read_os(siren))
                     # 紫币在商店里，需要额外进一次港口
                     if 'PurpleCoin' in active:
-                        purple = _read_purple_coins(script)
+                        purple = _read_purple_coins(siren)
                         if purple is not None:
                             collected['PurpleCoin'] = purple
                 elif sea_miles:
                     # 只记海里数：仍需进大世界页，复用现成导航
-                    _enter_os_and_record_sea_miles(script)
+                    _enter_os_and_record_sea_miles(siren)
             elif stage == 'shop':
                 collected.update(_read_shop(script, active))
             elif stage == 'build':
