@@ -421,6 +421,62 @@ def _read_purple_coins(ui):
             logger.warning(f'[资源刷新] 退出港口失败: {type(error).__name__}')
 
 
+def _sea_miles_ready(image):
+    """判断当前截图里「出海里程」数字是否可见（亮黄色像素足够多）。
+
+    只做像素判据，不做 OCR，成本很低，可以反复调用。
+
+    Args:
+        image (np.ndarray): 1280×720 RGB 截图。
+
+    Returns:
+        bool: 数字区域是否有足够多的亮黄色像素。
+    """
+    if image is None:
+        return False
+    x0, y0, x1, y1 = SEA_MILES_AREA
+    try:
+        crop = image[y0:y1, x0:x1]
+    except Exception:
+        return False
+    if getattr(crop, 'size', 0) == 0:
+        return False
+    r = crop[:, :, 0].astype(int)
+    g = crop[:, :, 1].astype(int)
+    b = crop[:, :, 2].astype(int)
+    # 数字为亮黄 RGB(242,212,56)；容差放宽以兼容渲染差异
+    mask = (r > 190) & (g > 165) & (b < 150)
+    return int(mask.sum()) >= 20
+
+
+def _wait_sea_miles_visible(ui, timeout=5.0):
+    """等「出海里程」在画面上稳定可见，返回那一刻的截图。
+
+    Args:
+        ui: 具备 device 的模块对象。
+        timeout (float): 最多等待秒数。
+
+    Returns:
+        np.ndarray | None: 可见时的截图，超时返回 None。
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    # 先等一小会儿让弹窗动画走完，避免第一帧就判失败
+    time.sleep(0.6)
+    while True:
+        try:
+            ui.device.screenshot()
+            image = ui.device.image
+        except Exception:
+            image = None
+        if _sea_miles_ready(image):
+            return image
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.4)
+
+
 def _record_sea_miles(ui):
     """在当前画面读取「出海里程」并写入 cl1 数据库。
 
@@ -443,13 +499,21 @@ def _record_sea_miles(ui):
         from module.base.button import Button
         from module.ocr.ocr import Digit
 
+        # 等界面稳定再读。refresh_resources 前脚刚关掉行动力弹窗
+        # （ACTION_POINT_CANCEL），此时截图还停在弹窗动画上，右侧面板被遮挡，
+        # 会稳定读到 0。这里主动等到「出海里程」区域确实有亮黄色数字为止。
+        image = _wait_sea_miles_visible(ui)
+        if image is None:
+            logger.info('[资源刷新] 出海里程区域未就绪（可能有弹窗遮挡），跳过')
+            return None
+
         button = Button(area=SEA_MILES_AREA, color=SEA_MILES_COLOR,
                         button=SEA_MILES_AREA, name='SEA_MILES_OVERVIEW')
         ocr = Digit(button, lang='azur_lane', letter=SEA_MILES_LETTER,
                     threshold=128, alphabet='0123456789',
                     name='SEA_MILES_OVERVIEW')
 
-        value = ocr.ocr(ui.device.image)
+        value = ocr.ocr(image)
         if not isinstance(value, int) or value <= 0:
             logger.info(f'[资源刷新] 海里数识别无效({value!r})，跳过')
             return None
