@@ -47,12 +47,20 @@ Reward.run()
 主页 Dashboard（这就是为什么 `dashboard.yaml` 里查不到它）。
 
 上游只在**侵蚀1练级**任务里更新它，但实际上只要在大世界开新图（月度开荒、
-隐秘海域、深渊、要塞……）海里数都会增长。本扩展在进入大世界页时顺带记录一次，
-不需要额外导航：
+隐秘海域、深渊、要塞……）海里数都会增长。
 
-- 读取位置：大世界页右栏 · 情报/MISSION 子页（默认展开），OCR 区域 `MARITIME_SCHEDULE`
+读取方式**与上游完全一致**（`module/os/tasks/hazard_leveling.py`）：
+
+```
+地图页 --MISSION_ENTER(底部「情报 DETAILS」)--> 作战情报弹窗
+      --OCR MARITIME_SCHEDULE (162,505)-->
+      --MISSION_QUIT(X)--> 返回地图
+```
+
+- 进入弹窗后先等 `MISSION_CHECK` 确认页面就绪，再 OCR
 - 写入：`record_ap_snapshot(distance=...)` → `cl1` 数据库
 - 开关：`DashboardRefresh.RecordSeaMiles`，默认 `true`
+- 2026-11-05 实机验证：读出 12685，与画面一致
 
 > 全部复用上游已有的读取函数，**不新增任何 OCR 模板**，
 > 因此与游戏内实际数值口径完全一致。

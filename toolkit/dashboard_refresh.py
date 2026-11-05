@@ -67,16 +67,9 @@ _STAGES = (
 
 #: 海里数：不属于 Dashboard 的 12 项，走 cl1 数据库的 distance 序列，
 #: 由 runtime_service.monthly_statistics_resources 渲染到主页 Dashboard。
-#: 它在大世界总览页右栏常显，读取成本极低，因此不受 Resources 限制，
-#: 只要进了大世界页就顺手记录（可用 RecordSeaMiles 单独关闭）。
+#: 它在大世界「作战情报」弹窗左栏显示，读取成本极低，因此不受 Resources
+#: 限制，只要进了大世界页就顺手记录（可用 RecordSeaMiles 单独关闭）。
 SEA_MILES_DEFAULT = True
-
-#: 「出海里程」数值区域（1280×720 坐标），按 2560×1440 实机截图标定。
-#: 注意不是上游 MARITIME_SCHEDULE(162,505)——那个在左侧，是侵蚀1情报子页
-#: 的旧位置，在大世界总览页会一直读到 0。
-SEA_MILES_AREA = (1040, 414, 1096, 433)
-SEA_MILES_COLOR = (242, 212, 56)
-SEA_MILES_LETTER = (255, 207, 66)
 
 #: 读紫币时，若未停在碧蓝港口则导航到这个默认港口。
 DEFAULT_PORT_NAME = 'NY City'
@@ -276,16 +269,17 @@ def _read_pt(ui):
     return {'Pt': int(pt)}
 
 
-def _wait_page(ui, pages, timeout=6.0):
-    """等待当前页面成为 pages 中的任意一个。
+def _wait_page(ui, targets, timeout=6.0, mode='page'):
+    """等待目标条件成立。
 
     Args:
-        ui: 具备 device 与 ui_page_appear 的模块对象。
-        pages (tuple): 目标 Page 列表。
+        ui: 具备 device 的模块对象。
+        targets (tuple): mode='page' 时是 Page 列表；mode='appear' 时是 Button 列表。
         timeout (float): 最多等待秒数。
+        mode (str): 'page' 用 ui_page_appear，'appear' 用 appear（弹窗类）。
 
     Returns:
-        bool: 是否到达目标页面之一。
+        bool: 是否在超时前满足条件。
     """
     import time
 
@@ -293,8 +287,12 @@ def _wait_page(ui, pages, timeout=6.0):
     while True:
         try:
             ui.device.screenshot()
-            if any(ui.ui_page_appear(page) for page in pages):
-                return True
+            if mode == 'appear':
+                if any(ui.appear(t, offset=(20, 20)) for t in targets):
+                    return True
+            else:
+                if any(ui.ui_page_appear(page) for page in targets):
+                    return True
         except Exception:
             pass
         if time.monotonic() >= deadline:
@@ -471,101 +469,49 @@ def _read_purple_coins(ui):
             logger.warning(f'[资源刷新] 退出港口失败: {type(error).__name__}')
 
 
-def _sea_miles_ready(image):
-    """判断当前截图里「出海里程」数字是否可见（亮黄色像素足够多）。
-
-    只做像素判据，不做 OCR，成本很低，可以反复调用。
-
-    Args:
-        image (np.ndarray): 1280×720 RGB 截图。
-
-    Returns:
-        bool: 数字区域是否有足够多的亮黄色像素。
-    """
-    if image is None:
-        return False
-    x0, y0, x1, y1 = SEA_MILES_AREA
-    try:
-        crop = image[y0:y1, x0:x1]
-    except Exception:
-        return False
-    if getattr(crop, 'size', 0) == 0:
-        return False
-    r = crop[:, :, 0].astype(int)
-    g = crop[:, :, 1].astype(int)
-    b = crop[:, :, 2].astype(int)
-    # 数字为亮黄 RGB(242,212,56)；容差放宽以兼容渲染差异
-    mask = (r > 190) & (g > 165) & (b < 150)
-    return int(mask.sum()) >= 20
-
-
-def _wait_sea_miles_visible(ui, timeout=5.0):
-    """等「出海里程」在画面上稳定可见，返回那一刻的截图。
-
-    Args:
-        ui: 具备 device 的模块对象。
-        timeout (float): 最多等待秒数。
-
-    Returns:
-        np.ndarray | None: 可见时的截图，超时返回 None。
-    """
-    import time
-
-    deadline = time.monotonic() + timeout
-    # 先等一小会儿让弹窗动画走完，避免第一帧就判失败
-    time.sleep(0.6)
-    while True:
-        try:
-            ui.device.screenshot()
-            image = ui.device.image
-        except Exception:
-            image = None
-        if _sea_miles_ready(image):
-            return image
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(0.4)
-
-
 def _record_sea_miles(ui):
-    """在当前画面读取「出海里程」并写入 cl1 数据库。
+    """进入「作战情报」弹窗读取出海里程，写入 cl1 数据库。
 
-    **不要用** 上游的 ``OCR_SEA_MILES_DIGIT``：它的区域 ``MARITIME_SCHEDULE``
-    是 ``(162, 505)``，位于屏幕**左侧**，那是侵蚀1情报子页里的旧位置，
-    在大世界总览页读到的一直是 0。
+    与上游 ``module/os/tasks/hazard_leveling.py`` 的 ``detect_and_record_sea_miles``
+    完全一致：
 
-    这里按 2560×1440 实机截图标定的位置读取：
-    「出海里程」数值在大世界**大地图总览页右侧面板**，
-    1280×720 下为 ``(1040, 414, 1096, 433)``，文字为亮黄色 RGB(242, 212, 56)。
-    实测 OCR 结果为 12685，与画面一致。
+        地图页 --MISSION_ENTER(底部「情报 DETAILS」)--> 作战情报弹窗
+              --读取 MARITIME_SCHEDULE (162,505)-->
+              --MISSION_QUIT(X)--> 返回地图
+
+    为什么不在总览大地图上读右侧面板：实测该面板的显示时机不稳定，
+    而且弹窗有明确的 ``MISSION_CHECK`` 标志，能确认页面就绪后再 OCR。
+    2026-11-05 实机验证：进弹窗后 ``(162,505)`` OCR 得到 12685，与画面一致。
 
     Args:
-        ui: 具备 config/device 的模块对象（大世界总览页已就绪）。
+        ui: OperationSiren 实例（当前在大世界地图/港口）。
 
     Returns:
         int | None: 读到的海里数，失败返回 None。
     """
+    from module.os_handler.assets import MISSION_ENTER, MISSION_CHECK, MISSION_QUIT
+    from module.os.sea_miles_ocr import OCR_SEA_MILES_DIGIT
+
+    siren = ui
+    entered = False
     try:
-        from module.base.button import Button
-        from module.ocr.ocr import Digit
+        # 1. 进入作战情报弹窗，等到 MISSION_CHECK 出现再继续
+        if siren.appear_then_click(MISSION_ENTER, offset=(200, 5), interval=3):
+            logger.info('[资源刷新] 打开作战情报')
+        else:
+            # 按钮可能已在弹窗内或尚未渲染，直接点击一次按钮中心
+            area = MISSION_ENTER.area
+            siren.device.click(((area[0] + area[2]) // 2, (area[1] + area[3]) // 2))
 
-        # 等界面稳定再读。refresh_resources 前脚刚关掉行动力弹窗
-        # （ACTION_POINT_CANCEL），此时截图还停在弹窗动画上，右侧面板被遮挡，
-        # 会稳定读到 0。这里主动等到「出海里程」区域确实有亮黄色数字为止。
-        image = _wait_sea_miles_visible(ui)
-        if image is None:
-            logger.info('[资源刷新] 出海里程区域未就绪（可能有弹窗遮挡），跳过')
+        if not _wait_page(ui, (MISSION_CHECK,), mode='appear', timeout=5.0):
+            logger.warning('[资源刷新] 未能打开作战情报弹窗，跳过海里数')
             return None
+        entered = True
 
-        button = Button(area=SEA_MILES_AREA, color=SEA_MILES_COLOR,
-                        button=SEA_MILES_AREA, name='SEA_MILES_OVERVIEW')
-        ocr = Digit(button, lang='azur_lane', letter=SEA_MILES_LETTER,
-                    threshold=128, alphabet='0123456789',
-                    name='SEA_MILES_OVERVIEW')
-
-        value = ocr.ocr(image)
+        # 2. 页面已确认，读上游标定的区域
+        value = OCR_SEA_MILES_DIGIT.ocr(siren.device.image)
         if not isinstance(value, int) or value <= 0:
-            logger.info(f'[资源刷新] 海里数识别无效({value!r})，跳过')
+            logger.warning(f'[资源刷新] 海里数识别无效({value!r})，跳过')
             return None
 
         from module.statistics.opsi_runtime import record_ap_snapshot
@@ -576,6 +522,14 @@ def _record_sea_miles(ui):
     except Exception as error:
         logger.warning(f'[资源刷新] 读取海里数失败: {type(error).__name__}: {error}')
         return None
+    finally:
+        # 无论成败都关闭弹窗，避免把后续流程卡在弹窗里
+        if entered:
+            try:
+                siren.ui_click(MISSION_QUIT, check_button=siren.is_in_map,
+                               offset=(20, 20), skip_first_screenshot=True)
+            except Exception as error:
+                logger.warning(f'[资源刷新] 关闭作战情报失败: {type(error).__name__}')
 
 
 def _enter_os_and_record_sea_miles(ui):
