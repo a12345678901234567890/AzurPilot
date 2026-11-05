@@ -1,0 +1,75 @@
+name: sync-upstream
+
+# 定期把官方上游的更新合并进本 fork。
+#
+# 为什么用 merge 而不是 rebase：
+#   本 fork 长期保留一个本地提交（DashboardRefresh 扩展）。用 rebase 会重写
+#   提交历史，导致本地工作区与远端分叉，程序启动时的
+#   `git reset --hard origin/master` + `pull --ff-only` 仍能工作，但历史里
+#   会反复出现冲突解决痕迹。merge 保留双方历史，本地提交始终在上游之后，
+#   程序侧的 fast-forward 检查天然通过。
+#
+# 冲突处理：
+#   默认不自动解冲突。发生冲突时用一个明确标记的提交记录下来并让 job 失败，
+#   GitHub 会发邮件提醒你手动处理。也可以在网页上点 "Re-run" 前先手动合并。
+#
+# 关闭方式：仓库 Settings → Actions → 禁用本 workflow，或删除本文件。
+
+on:
+  schedule:
+    # 每小时的第 17 分钟检查一次（避开整点的 CI 高峰）
+    - cron: '17 * * * *'
+  workflow_dispatch:      # 也支持在 Actions 页面手动触发
+
+permissions:
+  contents: write         # 需要写权限才能把 merge 结果推回本仓库
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 需要完整历史才能正确 merge
+          persist-credentials: true  # 沿用 GITHUB_TOKEN 推送回本仓库
+
+      - name: Merge upstream into fork
+        env:
+          UPSTREAM_REPO: wess09/AzurPilot
+          BRANCH: master
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 只加 upstream 远程；无需 token，官方仓库是公开的
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+          echo "Fetching upstream/${BRANCH} ..."
+          git fetch --no-tags upstream "${BRANCH}"
+
+          if git merge-base --is-ancestor "upstream/${BRANCH}" HEAD; then
+            echo "已是最新，无需合并。"
+            exit 0
+          fi
+
+          echo "发现上游新提交，开始合并："
+          git log --oneline "HEAD..upstream/${BRANCH}" | head -20
+
+          if git merge --no-edit "upstream/${BRANCH}"; then
+            echo "合并成功。"
+            git push origin "HEAD:${BRANCH}"
+          else
+            echo "::error::合并上游时发生冲突，需要人工处理。"
+            git diff --name-only --diff-filter=U || true
+            # 中止合并，保持分支干净，避免把冲突标记推上去
+            git merge --abort || true
+            exit 1
+          fi

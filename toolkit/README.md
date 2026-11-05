@@ -99,19 +99,36 @@ module/reward/reward.py         # 只在 run() 末尾追加 5 行挂载
 
 ## 8. 与上游同步
 
-本 fork 相对上游 `wess09/AzurPilot` 只领先一个 commit，改动集中在：
+本 fork 相对上游 `wess09/AzurPilot` 只领先一个本地提交，改动集中在：
 
 1. `toolkit/`（新增目录）
 2. `module/reward/reward.py`（末尾 +5 行）
 3. `.gitignore`（取消 `/toolkit` 忽略）
+4. `.github/workflows/sync-upstream.yml`（自动合并上游）
 
-同步上游时：
+### 自动同步（推荐）
+
+`.github/workflows/sync-upstream.yml` 每小时检查一次上游，有更新就自动
+`merge` 进 master 并推送。你不需要做任何事。
+
+- **无冲突** → 自动合并并推送，下次程序启动就会拉到新代码
+- **有冲突** → 工作流**中止合并**（不推送半成品）并让 Action 失败，
+  GitHub 会邮件提醒你手动处理
+
+手动触发：仓库 → Actions → `sync-upstream` → Run workflow。
+
+### 手动同步
 
 ```bash
 git fetch upstream
-git merge upstream/master     # 若 reward.py 有冲突，保留末尾那 5 行即可
+git merge upstream/master     # 若 reward.py 冲突，保留末尾那 5 行即可
 git push origin master
 ```
+
+> 为什么用 merge 而不是 rebase：merge 保留双方历史，本地提交始终在
+> 上游之后，程序启动时的 `git reset --hard origin/master` +
+> `pull --ff-only` 天然通过。rebase 会重写历史，反而容易把工作区和
+> 远端搞分叉。
 
 ## 9. 卸载
 
