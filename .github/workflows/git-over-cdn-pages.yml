@@ -36,9 +36,8 @@ on:
         description: "本次版本的 Worker 预览别名"
         required: false
         default: "git-over-cdn-preview"
-  push:
-    branches:
-      - master
+  # 本 fork 已移除 push 触发：该 workflow 依赖上游 Cloudflare secrets，
+  # 在 fork 里每次推送都会失败并发送通知邮件。需要时可在 Actions 页面手动触发。
 
 concurrency:
   group: git-over-cdn-worker

@@ -2,12 +2,11 @@ name: Sync dev ancestry after squash
 
 # 长期分支 dev -> master 继续允许 Squash and merge。
 # 合并后记录 master 的 Squash 提交为 dev 的祖先，避免下一次 PR 重复计算历史差异。
+#
+# 本 fork 已移除 pull_request / push 触发：该 workflow 依赖上游 dev 分支与
+# secrets，在 fork 里每次推送都会失败并发送通知邮件。需要时可在
+# Actions 页面手动触发。
 on:
-  pull_request:
-    types: [closed]
-    branches: [master]
-  push:
-    branches: [master]
   workflow_dispatch:
     inputs:
       pr_number:

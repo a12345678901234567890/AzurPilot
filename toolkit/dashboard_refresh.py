@@ -78,6 +78,9 @@ SEA_MILES_AREA = (1040, 414, 1096, 433)
 SEA_MILES_COLOR = (242, 212, 56)
 SEA_MILES_LETTER = (255, 207, 66)
 
+#: 读紫币时，若未停在碧蓝港口则导航到这个默认港口。
+DEFAULT_PORT_NAME = 'NY City'
+
 
 # ==================== 配置读取 ====================
 
@@ -302,13 +305,20 @@ def _read_purple_coins(ui):
     上游 ``SHOP_PURPLE_COINS`` 的坐标是商店内的位置，在地图页会读到
     地图背景并可能吐出错值。
 
-    流程（全部复用上游导航，不新增 OCR 模板）::
+    导航策略（按用户要求，运行在 Reward 收菜之后、独占游戏，不必保守）：
 
-        地图页 --PORT_ENTER--> 港口 --PORT_GOTO_SUPPLY--> 商店
-              <--BACK_ARROW--     <--BACK_ARROW--
+    1. 已经停泊在**碧蓝港口**（``is_azur_port``）→ 就地进商店读。
+    2. 停在**红色港口**（被塞壬占领，没有商店）→ 导航到最近的碧蓝港口。
+    3. 在普通海域或未停泊 → 导航到 **NY City**（默认港口）。
+
+    流程::
+
+        地图页 --globe_goto--> 目标港口 --PORT_ENTER--> 港口
+              --PORT_GOTO_SUPPLY--> 商店 --读紫币-->
+              <--BACK_ARROW--  <--BACK_ARROW--
 
     Args:
-        ui: OperationSiren 实例（当前在地图/大世界页）。
+        ui: OperationSiren 实例（当前在大世界页）。
 
     Returns:
         int | None: 紫币数量，失败返回 None。
@@ -321,16 +331,45 @@ def _read_purple_coins(ui):
     siren = ui
     entered_port = entered_shop = False
     try:
-        # 1. 进港口：PORT_ENTER 只在地图页停泊时出现
+        # 0. 确保停在一个能买东西的碧蓝港口
+        try:
+            zone = siren.zone
+            is_azur = bool(getattr(zone, 'is_azur_port', False))
+        except Exception:
+            is_azur = False
+
+        if not is_azur:
+            target = siren.name_to_zone(DEFAULT_PORT_NAME)
+            logger.info(f'[资源刷新] 未停在碧蓝港口，导航到 {DEFAULT_PORT_NAME}')
+            try:
+                siren.globe_goto(target)
+            except Exception as error:
+                # 导航失败时退回最近碧蓝港口
+                logger.warning(f'[资源刷新] 前往 {DEFAULT_PORT_NAME} 失败({type(error).__name__})，改用最近碧蓝港口')
+                try:
+                    nearest = siren.zone_nearest_azur_port(siren.zone)
+                    siren.globe_goto(nearest)
+                except Exception as error2:
+                    logger.warning(f'[资源刷新] 就近前往碧蓝港口也失败: {type(error2).__name__}')
+                    return None
+            # 到港后仍要确认确实能停泊
+            if not siren.appear(PORT_ENTER, offset=(20, 20)):
+                logger.warning('[资源刷新] 抵达后仍无停泊入口，跳过紫币')
+                return None
+
+        # 1. 进港口
         if not siren.appear(PORT_ENTER, offset=(20, 20)):
-            logger.info('[资源刷新] 当前不在可停泊的港口，跳过紫币')
+            logger.warning('[资源刷新] 当前无停泊入口，跳过紫币')
             return None
         siren.ui_click(PORT_ENTER, check_button=PORT_CHECK,
                        appear_button=PORT_ENTER, offset=(20, 20),
                        skip_first_screenshot=True)
         entered_port = True
 
-        # 2. 进补给商店
+        # 2. 进补给商店；红港没有商店，直接放弃
+        if not siren.appear(PORT_GOTO_SUPPLY, offset=(20, 20)):
+            logger.warning('[资源刷新] 该港口没有补给商店（可能是红色港口），跳过紫币')
+            return None
         siren.ui_click(PORT_GOTO_SUPPLY, appear_button=PORT_CHECK,
                        check_button=PORT_SUPPLY_CHECK, skip_first_screenshot=True)
         entered_shop = True
