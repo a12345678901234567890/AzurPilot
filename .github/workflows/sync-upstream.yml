@@ -17,8 +17,8 @@ name: sync-upstream
 
 on:
   schedule:
-    # 每小时的第 17 分钟检查一次（避开整点的 CI 高峰）
-    - cron: '17 * * * *'
+    # 每 4 小时的第 17 分钟检查一次（避开整点的 CI 高峰）
+    - cron: '17 */4 * * *'
   workflow_dispatch:      # 也支持在 Actions 页面手动触发
 
 permissions:
